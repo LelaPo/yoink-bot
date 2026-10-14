@@ -9,7 +9,7 @@ def format_picker_kb(token: str) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(text="mp3 (320k)", callback_data=f"dl:audio_mp3:{token}"),
-                InlineKeyboardButton(text="opus (source)", callback_data=f"dl:audio_opus:{token}"),
+                InlineKeyboardButton(text="m4a (source)", callback_data=f"dl:audio_m4a:{token}"),
             ],
         ]
     )
@@ -23,7 +23,7 @@ def tag_editor_kb(token: str) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="edit artist", callback_data=f"tag:artist:{token}"),
             ],
             [
-                InlineKeyboardButton(text="send audio now", callback_data=f"tag:send:{token}"),
+                InlineKeyboardButton(text="send audio", callback_data=f"tag:send:{token}"),
             ],
         ]
     )
