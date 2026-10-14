@@ -7,7 +7,7 @@ import tempfile
 from typing import Optional
 
 from aiogram import F, Router
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, FSInputFile, Message
 
@@ -44,7 +44,91 @@ async def cmd_start(message: Message):
     await message.answer("send me a youtube link.")
 
 
-@router.message(F.text, ~F.text.startswith("/"))
+# fsm хендлеры вынесены выше, чтобы текст не перехватывался парсером ссылок
+@router.message(AudioEditState.waiting_title)
+async def process_new_title(message: Message, state: FSMContext):
+    data = await state.get_data()
+    token = data.get("token")
+    task = pending_tasks.get(token) if token else None
+    if not task:
+        await state.clear()
+        return
+
+    task["title"] = message.text.strip()
+    await message.delete()
+    await state.clear()
+
+    caption = build_audio_caption(
+        task["artist"],
+        task["title"],
+        task["duration"],
+        task["size_mb"],
+        task["fmt_name"],
+        task.get("views"),
+    )
+
+    try:
+        if task.get("has_cover"):
+            await message.bot.edit_message_caption(
+                chat_id=message.chat.id,
+                message_id=task["preview_msg_id"],
+                caption=caption,
+                reply_markup=tag_editor_kb(token),
+            )
+        else:
+            await message.bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=task["preview_msg_id"],
+                text=caption,
+                reply_markup=tag_editor_kb(token),
+            )
+    except Exception:
+        pass
+
+
+@router.message(AudioEditState.waiting_artist)
+async def process_new_artist(message: Message, state: FSMContext):
+    data = await state.get_data()
+    token = data.get("token")
+    task = pending_tasks.get(token) if token else None
+    if not task:
+        await state.clear()
+        return
+
+    task["artist"] = message.text.strip()
+    await message.delete()
+    await state.clear()
+
+    caption = build_audio_caption(
+        task["artist"],
+        task["title"],
+        task["duration"],
+        task["size_mb"],
+        task["fmt_name"],
+        task.get("views"),
+    )
+
+    try:
+        if task.get("has_cover"):
+            await message.bot.edit_message_caption(
+                chat_id=message.chat.id,
+                message_id=task["preview_msg_id"],
+                caption=caption,
+                reply_markup=tag_editor_kb(token),
+            )
+        else:
+            await message.bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=task["preview_msg_id"],
+                text=caption,
+                reply_markup=tag_editor_kb(token),
+            )
+    except Exception:
+        pass
+
+
+# строгий фильтр StateFilter(None) гарантирует, что ссылка ищется только в обычном режиме
+@router.message(StateFilter(None), F.text, ~F.text.startswith("/"))
 async def handle_link(message: Message):
     if not is_allowed(message.from_user.id if message.from_user else None):
         await message.answer("access denied.")
@@ -96,7 +180,6 @@ async def handle_download_choice(callback: CallbackQuery):
             shutil.rmtree(work_dir, ignore_errors=True)
             return
 
-        # видео: отдаем сразу с полной карточкой характеристик
         if mode == "video":
             caption = build_video_caption(info, size_mb)
             payload = FSInputFile(file_path)
@@ -106,27 +189,29 @@ async def handle_download_choice(callback: CallbackQuery):
             pending_tasks.pop(token, None)
             return
 
-        # аудио: скачиваем обложку и открываем интерактивную карточку
         raw_title = info.get("title") or "track"
-        uploader = info.get("uploader") or "artist"
+        uploader = info.get("uploader") or info.get("channel") or "artist"
         artist, title = parse_track_info(raw_title, uploader)
         duration = int(info.get("duration") or 0)
+        views = info.get("view_count")
 
         cover_path = os.path.join(work_dir, "cover.jpg")
         has_cover = download_cover(info.get("thumbnail"), cover_path) is not None
 
         fmt_name = "mp3 (320 kbps)" if mode == "audio_mp3" else "m4a (source aac)"
-        caption = build_audio_caption(artist, title, duration, size_mb, fmt_name)
+        caption = build_audio_caption(artist, title, duration, size_mb, fmt_name, views)
 
         task.update({
             "file_path": file_path,
             "work_dir": work_dir,
             "cover_path": cover_path if has_cover else None,
+            "has_cover": has_cover,
             "artist": artist,
             "title": title,
             "duration": duration,
             "size_mb": size_mb,
             "fmt_name": fmt_name,
+            "views": views,
         })
 
         await status_msg.delete()
@@ -168,11 +253,9 @@ async def handle_tag_actions(callback: CallbackQuery, state: FSMContext):
 
     elif action == "send":
         await callback.answer()
-        # удаляем карточку редактирования
         if callback.message:
             await callback.message.delete()
 
-        # вшиваем теги и обложку в файл
         apply_audio_tags(
             task["file_path"],
             task["artist"],
@@ -193,51 +276,3 @@ async def handle_tag_actions(callback: CallbackQuery, state: FSMContext):
 
         shutil.rmtree(task["work_dir"], ignore_errors=True)
         pending_tasks.pop(token, None)
-
-
-@router.message(AudioEditState.waiting_title)
-async def process_new_title(message: Message, state: FSMContext):
-    data = await state.get_data()
-    token = data["token"]
-    task = pending_tasks.get(token)
-    if not task:
-        await state.clear()
-        return
-
-    task["title"] = message.text.strip()
-    await message.delete()  # удаляем ввод пользователя
-    await state.clear()
-
-    caption = build_audio_caption(
-        task["artist"], task["title"], task["duration"], task["size_mb"], task["fmt_name"]
-    )
-    await message.bot.edit_message_caption(
-        chat_id=message.chat.id,
-        message_id=task["preview_msg_id"],
-        caption=caption,
-        reply_markup=tag_editor_kb(token),
-    )
-
-
-@router.message(AudioEditState.waiting_artist)
-async def process_new_artist(message: Message, state: FSMContext):
-    data = await state.get_data()
-    token = data["token"]
-    task = pending_tasks.get(token)
-    if not task:
-        await state.clear()
-        return
-
-    task["artist"] = message.text.strip()
-    await message.delete()
-    await state.clear()
-
-    caption = build_audio_caption(
-        task["artist"], task["title"], task["duration"], task["size_mb"], task["fmt_name"]
-    )
-    await message.bot.edit_message_caption(
-        chat_id=message.chat.id,
-        message_id=task["preview_msg_id"],
-        caption=caption,
-        reply_markup=tag_editor_kb(token),
-    )

@@ -17,6 +17,50 @@ def format_duration(seconds: Optional[int | float]) -> str:
     return f"{m:02d}:{s:02d}"
 
 
+def format_count(count: Optional[int]) -> str:
+    if not count:
+        return ""
+    if count >= 1_000_000_000:
+        return f"{count / 1_000_000_000:.1f}b"
+    if count >= 1_000_000:
+        return f"{count / 1_000_000:.1f}m"
+    if count >= 1_000:
+        return f"{count / 1_000:.1f}k"
+    return str(count)
+
+
+def humanize_vcodec(vcodec: Optional[str]) -> str:
+    if not vcodec:
+        return "h.264"
+    c = vcodec.lower()
+    if c.startswith("av01"):
+        parts = c.split(".")
+        bitdepth = f" ({parts[3]}-bit)" if len(parts) > 3 and parts[3].isdigit() else ""
+        return f"av1{bitdepth}"
+    if c.startswith("avc1") or "h264" in c:
+        return "h.264"
+    if c.startswith("vp09") or "vp9" in c:
+        return "vp9"
+    if c.startswith("vp08") or "vp8" in c:
+        return "vp8"
+    if "hevc" in c or c.startswith("hvc1") or "h265" in c:
+        return "h.265"
+    return c.split(".")[0]
+
+
+def humanize_acodec(acodec: Optional[str]) -> str:
+    if not acodec:
+        return "aac"
+    c = acodec.lower()
+    if "mp4a.40.2" in c or "aac" in c:
+        return "aac lc"
+    if "opus" in c:
+        return "opus"
+    if "mp3" in c:
+        return "mp3"
+    return c.split(".")[0]
+
+
 def parse_track_info(raw_title: str, uploader: str) -> tuple[str, str]:
     cleaned = raw_title.strip()
     if " - " in cleaned:
@@ -81,37 +125,53 @@ def apply_audio_tags(
 
 def build_video_caption(info: dict, size_mb: float) -> str:
     title = str(info.get("title") or "video").strip().lower()
+    uploader = str(info.get("uploader") or info.get("channel") or "").strip().lower()
     duration = format_duration(info.get("duration"))
+    views = format_count(info.get("view_count"))
+
     width = info.get("width")
     height = info.get("height")
     res = f"{width}x{height}" if width and height else "720p"
     fps = info.get("fps")
     fps_str = f" @ {int(fps)}fps" if fps else ""
-    vcodec = str(info.get("vcodec") or "h264").lower()
-    acodec = str(info.get("acodec") or "aac").lower()
 
-    if "avc" in vcodec:
-        vcodec = "h264"
-    elif "vp09" in vcodec:
-        vcodec = "vp9"
-    if "mp4a" in acodec:
-        acodec = "aac"
+    vcodec = humanize_vcodec(info.get("vcodec"))
+    acodec = humanize_acodec(info.get("acodec"))
 
-    return "\n".join([
-        f"title: {title[:70]}",
-        f"duration: {duration}",
-        f"size: {size_mb:.1f} mb",
-        "container: mp4",
-        f"video: {vcodec} {res}{fps_str}",
-        f"audio: {acodec}",
-    ])
+    tbr = info.get("tbr")
+    bitrate_str = f", ~{int(tbr)} kbps" if tbr else ""
+
+    lines = [f"title: {title[:70]}"]
+    if uploader:
+        lines.append(f"channel: {uploader[:40]}")
+
+    meta = [f"duration: {duration}", f"size: {size_mb:.1f} mb"]
+    if views:
+        meta.append(f"views: {views}")
+    lines.append(" • ".join(meta))
+
+    lines.append(f"video: {vcodec} ({res}{fps_str}{bitrate_str})")
+    lines.append(f"audio: {acodec}")
+    lines.append("container: mp4")
+
+    return "\n".join(lines)
 
 
-def build_audio_caption(artist: str, title: str, duration_sec: int, size_mb: float, fmt: str) -> str:
-    return "\n".join([
+def build_audio_caption(
+    artist: str,
+    title: str,
+    duration_sec: int,
+    size_mb: float,
+    fmt: str,
+    views_count: Optional[int] = None,
+) -> str:
+    lines = [
         f"track: {title.lower()[:60]}",
         f"artist: {artist.lower()[:60]}",
-        f"duration: {format_duration(duration_sec)}",
-        f"size: {size_mb:.1f} mb",
+        f"duration: {format_duration(duration_sec)} • size: {size_mb:.1f} mb",
         f"format: {fmt}",
-    ])
+    ]
+    views = format_count(views_count)
+    if views:
+        lines.append(f"views: {views}")
+    return "\n".join(lines)
