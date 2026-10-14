@@ -69,7 +69,47 @@ def extract_youtube_url(text: Optional[str]) -> Optional[str]:
     return match.group(0) if match else None
 
 
-def run_download(url: str, mode: str, target_dir: str) -> str:
+def format_duration(seconds: Optional[int | float]) -> str:
+    if not seconds:
+        return "unknown"
+    secs = int(seconds)
+    m, s = divmod(secs, 60)
+    h, m = divmod(m, 60)
+    if h > 0:
+        return f"{h:02d}:{m:02d}:{s:02d}"
+    return f"{m:02d}:{s:02d}"
+
+
+def build_caption(info: dict, mode: str, size_mb: float) -> str:
+    title = str(info.get("title") or "media").strip().lower()
+    duration = format_duration(info.get("duration"))
+    lines = [
+        "yoink: media ready",
+        f"title: {title[:60]}",
+        f"duration: {duration}",
+        f"size: {size_mb:.1f} mb",
+    ]
+    if mode == "video":
+        width = info.get("width")
+        height = info.get("height")
+        res = f"{width}x{height}" if width and height else "720p"
+        fps = info.get("fps")
+        fps_str = f" @ {int(fps)}fps" if fps else ""
+        vcodec = str(info.get("vcodec") or "unknown").lower()
+        acodec = str(info.get("acodec") or "unknown").lower()
+        if "avc" in vcodec:
+            vcodec = "h264"
+        elif "vp09" in vcodec:
+            vcodec = "vp9"
+        lines.append(f"format: mp4 ({vcodec}/{acodec})")
+        lines.append(f"resolution: {res}{fps_str}")
+    else:
+        lines.append("format: mp3")
+        lines.append("bitrate: 192 kbps")
+    return "\n".join(lines)
+
+
+def run_download(url: str, mode: str, target_dir: str) -> tuple[str, dict]:
     # download media synchronously with yt-dlp
     outtmpl = os.path.join(target_dir, "%(title).50s-%(id)s.%(ext)s")
     ydl_opts: dict = {
@@ -87,11 +127,14 @@ def run_download(url: str, mode: str, target_dir: str) -> str:
             {
                 "key": "FFmpegExtractAudio",
                 "preferredcodec": "mp3",
+                "preferredquality": "192",
             }
         ]
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
+        info = ydl.extract_info(url, download=True)
+        if "entries" in info:
+            info = info["entries"][0]
 
     files = [
         os.path.join(target_dir, f)
@@ -102,7 +145,7 @@ def run_download(url: str, mode: str, target_dir: str) -> str:
         raise RuntimeError("no output file produced")
 
     files.sort(key=lambda p: os.path.getsize(p), reverse=True)
-    return files[0]
+    return files[0], info
 
 
 @dp.message(CommandStart())
@@ -131,8 +174,8 @@ async def handle_text(message: Message) -> None:
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="video", callback_data=f"dl:video:{token}"),
-                InlineKeyboardButton(text="audio", callback_data=f"dl:audio:{token}"),
+                InlineKeyboardButton(text="mp4 (720p)", callback_data=f"dl:video:{token}"),
+                InlineKeyboardButton(text="mp3 (192k)", callback_data=f"dl:audio:{token}"),
             ]
         ]
     )
@@ -166,7 +209,7 @@ async def handle_callback(callback: CallbackQuery) -> None:
     loop = asyncio.get_running_loop()
     work_dir = tempfile.mkdtemp(dir=DOWNLOAD_DIR)
     try:
-        file_path = await loop.run_in_executor(None, run_download, url, mode, work_dir)
+        file_path, info = await loop.run_in_executor(None, run_download, url, mode, work_dir)
         size_mb = os.path.getsize(file_path) / (1024 * 1024)
         if size_mb > MAX_FILE_MB:
             if mode == "video" and callback.message:
@@ -177,12 +220,13 @@ async def handle_callback(callback: CallbackQuery) -> None:
                 await callback.message.answer("yoink: that file is over the size limit.")
             return
 
+        caption = build_caption(info, mode, size_mb)
         payload = FSInputFile(file_path)
         if callback.message:
             if mode == "video":
-                await callback.message.answer_video(payload)
+                await callback.message.answer_video(payload, caption=caption)
             else:
-                await callback.message.answer_audio(payload)
+                await callback.message.answer_audio(payload, caption=caption)
     except Exception as exc:
         logging.warning("yoink: download error: %s", exc)
         if callback.message:
