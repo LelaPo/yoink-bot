@@ -416,4 +416,64 @@ async def handle_tag_actions(callback: CallbackQuery, state: FSMContext):
 
         caption = build_audio_caption(
             task["artist"],
-            task["t
+            task["title"],
+            task["duration"],
+            task["size_mb"],
+            task["fmt_name"],
+            task.get("views"),
+            task["source"],
+        )
+
+        try:
+            if task.get("cover_path"):
+                await callback.message.edit_media(
+                    media=InputMediaPhoto(
+                        media=FSInputFile(task["cover_path"]),
+                        caption=caption,
+                    ),
+                    reply_markup=tag_editor_kb(token),
+                )
+            else:
+                await callback.message.edit_caption(
+                    caption=caption,
+                    reply_markup=tag_editor_kb(token),
+                )
+        except Exception:
+            pass
+        await callback.answer("reverted to youtube metadata.")
+
+    elif action == "cancel":
+        # удаляем задачу и очищаем диск
+        await state.clear()
+        if callback.message:
+            await callback.message.delete()
+        shutil.rmtree(task["work_dir"], ignore_errors=True)
+        pending_tasks.pop(token, None)
+        await callback.answer("cancelled.")
+
+    elif action == "send":
+        await state.clear()
+        await callback.answer()
+        if callback.message:
+            await callback.message.delete()
+
+        apply_audio_tags(
+            task["file_path"],
+            task["artist"],
+            task["title"],
+            task.get("cover_path"),
+        )
+
+        payload = FSInputFile(task["file_path"])
+        thumb = FSInputFile(task["cover_path"]) if task.get("cover_path") else None
+
+        await callback.message.answer_audio(
+            payload,
+            title=task["title"],
+            performer=task["artist"],
+            duration=task["duration"],
+            thumbnail=thumb,
+        )
+
+        shutil.rmtree(task["work_dir"], ignore_errors=True)
+        pending_tasks.pop(token, None)
