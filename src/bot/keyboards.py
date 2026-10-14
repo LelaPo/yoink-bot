@@ -24,7 +24,11 @@ def tag_editor_kb(token: str) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(text="edit cover", callback_data=f"tag:cover:{token}"),
-                InlineKeyboardButton(text="shazam again", callback_data=f"tag:shazam:{token}"),
+                InlineKeyboardButton(text="shazam", callback_data=f"tag:shazam:{token}"),
+            ],
+            [
+                InlineKeyboardButton(text="reset", callback_data=f"tag:reset:{token}"),
+                InlineKeyboardButton(text="cancel", callback_data=f"tag:cancel:{token}"),
             ],
             [
                 InlineKeyboardButton(text="send audio", callback_data=f"tag:send:{token}"),

@@ -45,6 +45,12 @@ async def cmd_start(message: Message):
     await message.answer("send me a youtube link.")
 
 
+@router.message(Command("cancel"))
+async def cmd_cancel(message: Message, state: FSMContext):
+    await state.clear()
+    await message.delete()
+
+
 @router.message(AudioEditState.waiting_title)
 async def process_new_title(message: Message, state: FSMContext):
     data = await state.get_data()
@@ -55,6 +61,7 @@ async def process_new_title(message: Message, state: FSMContext):
         return
 
     task["title"] = message.text.strip()
+    task["source"] = "manual"
     await message.delete()
     await state.clear()
 
@@ -65,7 +72,7 @@ async def process_new_title(message: Message, state: FSMContext):
         task["size_mb"],
         task["fmt_name"],
         task.get("views"),
-        task.get("source", "manual"),
+        task["source"],
     )
 
     try:
@@ -97,6 +104,7 @@ async def process_new_artist(message: Message, state: FSMContext):
         return
 
     task["artist"] = message.text.strip()
+    task["source"] = "manual"
     await message.delete()
     await state.clear()
 
@@ -107,7 +115,7 @@ async def process_new_artist(message: Message, state: FSMContext):
         task["size_mb"],
         task["fmt_name"],
         task.get("views"),
-        task.get("source", "manual"),
+        task["source"],
     )
 
     try:
@@ -129,7 +137,6 @@ async def process_new_artist(message: Message, state: FSMContext):
         pass
 
 
-# обработка загрузки кастомной обложки (как фото)
 @router.message(AudioEditState.waiting_cover, F.photo)
 async def process_new_cover_photo(message: Message, state: FSMContext):
     data = await state.get_data()
@@ -145,6 +152,7 @@ async def process_new_cover_photo(message: Message, state: FSMContext):
 
     task["cover_path"] = custom_cover
     task["has_cover"] = True
+    task["source"] = "custom"
     await message.delete()
     await state.clear()
 
@@ -155,7 +163,7 @@ async def process_new_cover_photo(message: Message, state: FSMContext):
         task["size_mb"],
         task["fmt_name"],
         task.get("views"),
-        task.get("source", "custom"),
+        task["source"],
     )
 
     try:
@@ -172,7 +180,6 @@ async def process_new_cover_photo(message: Message, state: FSMContext):
         pass
 
 
-# обработка загрузки обложки файлом (документом)
 @router.message(AudioEditState.waiting_cover, F.document)
 async def process_new_cover_doc(message: Message, state: FSMContext):
     data = await state.get_data()
@@ -193,6 +200,7 @@ async def process_new_cover_doc(message: Message, state: FSMContext):
 
     task["cover_path"] = custom_cover
     task["has_cover"] = True
+    task["source"] = "custom"
     await message.delete()
     await state.clear()
 
@@ -203,7 +211,7 @@ async def process_new_cover_doc(message: Message, state: FSMContext):
         task["size_mb"],
         task["fmt_name"],
         task.get("views"),
-        task.get("source", "custom"),
+        task["source"],
     )
 
     try:
@@ -281,43 +289,34 @@ async def handle_download_choice(callback: CallbackQuery):
             pending_tasks.pop(token, None)
             return
 
-        # аудио: распознаем через shazam по акустическому отпечатку
-        await status_msg.edit_text("recognizing audio fingerprint...")
-        recognized = await recognize_track(file_path)
-
-        if recognized:
-            artist = recognized["artist"]
-            title = recognized["title"]
-            source = "shazam"
-            cover_url = recognized.get("cover_url") or info.get("thumbnail")
-        else:
-            raw_title = info.get("title") or "track"
-            uploader = info.get("uploader") or info.get("channel") or "artist"
-            artist, title = parse_track_info(raw_title, uploader)
-            source = "youtube"
-            cover_url = info.get("thumbnail")
-
+        # для аудио по умолчанию берем метаданные youtube
+        raw_title = info.get("title") or "track"
+        uploader = info.get("uploader") or info.get("channel") or "artist"
+        artist, title = parse_track_info(raw_title, uploader)
         duration = int(info.get("duration") or 0)
         views = info.get("view_count")
 
-        cover_path = os.path.join(work_dir, "cover.jpg")
-        has_cover = download_cover(cover_url, cover_path) is not None
+        cover_path = os.path.join(work_dir, "orig_cover.jpg")
+        has_cover = download_cover(info.get("thumbnail"), cover_path) is not None
 
         fmt_name = "mp3 (320 kbps)" if mode == "audio_mp3" else "m4a (source aac)"
-        caption = build_audio_caption(artist, title, duration, size_mb, fmt_name, views, source)
+        caption = build_audio_caption(artist, title, duration, size_mb, fmt_name, views, "youtube")
 
         task.update({
             "file_path": file_path,
             "work_dir": work_dir,
             "cover_path": cover_path if has_cover else None,
+            "orig_cover_path": cover_path if has_cover else None,
             "has_cover": has_cover,
             "artist": artist,
+            "orig_artist": artist,
             "title": title,
+            "orig_title": title,
             "duration": duration,
             "size_mb": size_mb,
             "fmt_name": fmt_name,
             "views": views,
-            "source": source,
+            "source": "youtube",
         })
 
         await status_msg.delete()
@@ -407,28 +406,14 @@ async def handle_tag_actions(callback: CallbackQuery, state: FSMContext):
             pass
         await callback.answer("matched with shazam.")
 
-    elif action == "send":
-        await callback.answer()
-        if callback.message:
-            await callback.message.delete()
+    elif action == "reset":
+        # полный возврат к исходным метаданным youtube
+        task["artist"] = task["orig_artist"]
+        task["title"] = task["orig_title"]
+        task["cover_path"] = task["orig_cover_path"]
+        task["has_cover"] = task["orig_cover_path"] is not None
+        task["source"] = "youtube"
 
-        apply_audio_tags(
-            task["file_path"],
+        caption = build_audio_caption(
             task["artist"],
-            task["title"],
-            task.get("cover_path"),
-        )
-
-        payload = FSInputFile(task["file_path"])
-        thumb = FSInputFile(task["cover_path"]) if task.get("cover_path") else None
-
-        await callback.message.answer_audio(
-            payload,
-            title=task["title"],
-            performer=task["artist"],
-            duration=task["duration"],
-            thumbnail=thumb,
-        )
-
-        shutil.rmtree(task["work_dir"], ignore_errors=True)
-        pending_tasks.pop(token, None)
+            task["t
