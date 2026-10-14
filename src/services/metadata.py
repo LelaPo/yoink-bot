@@ -99,15 +99,17 @@ def apply_audio_tags(
         tags.save(file_path)
 
         if cover_path and os.path.exists(cover_path):
-            audio = ID3(file_path)
+            mime = "image/png" if cover_path.lower().endswith(".png") else "image/jpeg"
             with open(cover_path, "rb") as img:
-                audio["APIC"] = APIC(
-                    encoding=3,
-                    mime="image/jpeg",
-                    type=3,
-                    desc="Cover",
-                    data=img.read(),
-                )
+                img_data = img.read()
+            audio = ID3(file_path)
+            audio["APIC"] = APIC(
+                encoding=3,
+                mime=mime,
+                type=3,
+                desc="Cover",
+                data=img_data,
+            )
             audio.save(file_path)
 
     elif ext == ".m4a":
@@ -116,8 +118,9 @@ def apply_audio_tags(
             tags["\xa9ART"] = artist
             tags["\xa9nam"] = title
             if cover_path and os.path.exists(cover_path):
+                img_fmt = MP4Cover.FORMAT_PNG if cover_path.lower().endswith(".png") else MP4Cover.FORMAT_JPEG
                 with open(cover_path, "rb") as img:
-                    tags["covr"] = [MP4Cover(img.read(), imageformat=MP4Cover.FORMAT_JPEG)]
+                    tags["covr"] = [MP4Cover(img.read(), imageformat=img_fmt)]
             tags.save()
         except Exception:
             pass
@@ -164,10 +167,12 @@ def build_audio_caption(
     size_mb: float,
     fmt: str,
     views_count: Optional[int] = None,
+    source: str = "youtube",
 ) -> str:
     lines = [
         f"track: {title.lower()[:60]}",
         f"artist: {artist.lower()[:60]}",
+        f"source: {source}",
         f"duration: {format_duration(duration_sec)} • size: {size_mb:.1f} mb",
         f"format: {fmt}",
     ]

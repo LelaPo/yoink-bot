@@ -9,7 +9,7 @@ from typing import Optional
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, FSInputFile, Message
+from aiogram.types import CallbackQuery, FSInputFile, InputMediaPhoto, Message
 
 from config import config
 from bot.keyboards import format_picker_kb, tag_editor_kb
@@ -22,6 +22,7 @@ from services.metadata import (
     download_cover,
     parse_track_info,
 )
+from services.recognition import recognize_track
 
 router = Router()
 
@@ -44,7 +45,6 @@ async def cmd_start(message: Message):
     await message.answer("send me a youtube link.")
 
 
-# fsm хендлеры вынесены выше, чтобы текст не перехватывался парсером ссылок
 @router.message(AudioEditState.waiting_title)
 async def process_new_title(message: Message, state: FSMContext):
     data = await state.get_data()
@@ -65,6 +65,7 @@ async def process_new_title(message: Message, state: FSMContext):
         task["size_mb"],
         task["fmt_name"],
         task.get("views"),
+        task.get("source", "manual"),
     )
 
     try:
@@ -106,6 +107,7 @@ async def process_new_artist(message: Message, state: FSMContext):
         task["size_mb"],
         task["fmt_name"],
         task.get("views"),
+        task.get("source", "manual"),
     )
 
     try:
@@ -127,7 +129,97 @@ async def process_new_artist(message: Message, state: FSMContext):
         pass
 
 
-# строгий фильтр StateFilter(None) гарантирует, что ссылка ищется только в обычном режиме
+# обработка загрузки кастомной обложки (как фото)
+@router.message(AudioEditState.waiting_cover, F.photo)
+async def process_new_cover_photo(message: Message, state: FSMContext):
+    data = await state.get_data()
+    token = data.get("token")
+    task = pending_tasks.get(token) if token else None
+    if not task:
+        await state.clear()
+        return
+
+    photo = message.photo[-1]
+    custom_cover = os.path.join(task["work_dir"], "custom_cover.jpg")
+    await message.bot.download(photo, destination=custom_cover)
+
+    task["cover_path"] = custom_cover
+    task["has_cover"] = True
+    await message.delete()
+    await state.clear()
+
+    caption = build_audio_caption(
+        task["artist"],
+        task["title"],
+        task["duration"],
+        task["size_mb"],
+        task["fmt_name"],
+        task.get("views"),
+        task.get("source", "custom"),
+    )
+
+    try:
+        await message.bot.edit_message_media(
+            chat_id=message.chat.id,
+            message_id=task["preview_msg_id"],
+            media=InputMediaPhoto(
+                media=FSInputFile(custom_cover),
+                caption=caption,
+            ),
+            reply_markup=tag_editor_kb(token),
+        )
+    except Exception:
+        pass
+
+
+# обработка загрузки обложки файлом (документом)
+@router.message(AudioEditState.waiting_cover, F.document)
+async def process_new_cover_doc(message: Message, state: FSMContext):
+    data = await state.get_data()
+    token = data.get("token")
+    task = pending_tasks.get(token) if token else None
+    if not task:
+        await state.clear()
+        return
+
+    doc = message.document
+    if not doc.mime_type or not doc.mime_type.startswith("image/"):
+        await message.delete()
+        return
+
+    ext = ".png" if "png" in doc.mime_type else ".jpg"
+    custom_cover = os.path.join(task["work_dir"], f"custom_cover{ext}")
+    await message.bot.download(doc, destination=custom_cover)
+
+    task["cover_path"] = custom_cover
+    task["has_cover"] = True
+    await message.delete()
+    await state.clear()
+
+    caption = build_audio_caption(
+        task["artist"],
+        task["title"],
+        task["duration"],
+        task["size_mb"],
+        task["fmt_name"],
+        task.get("views"),
+        task.get("source", "custom"),
+    )
+
+    try:
+        await message.bot.edit_message_media(
+            chat_id=message.chat.id,
+            message_id=task["preview_msg_id"],
+            media=InputMediaPhoto(
+                media=FSInputFile(custom_cover),
+                caption=caption,
+            ),
+            reply_markup=tag_editor_kb(token),
+        )
+    except Exception:
+        pass
+
+
 @router.message(StateFilter(None), F.text, ~F.text.startswith("/"))
 async def handle_link(message: Message):
     if not is_allowed(message.from_user.id if message.from_user else None):
@@ -189,17 +281,30 @@ async def handle_download_choice(callback: CallbackQuery):
             pending_tasks.pop(token, None)
             return
 
-        raw_title = info.get("title") or "track"
-        uploader = info.get("uploader") or info.get("channel") or "artist"
-        artist, title = parse_track_info(raw_title, uploader)
+        # аудио: распознаем через shazam по акустическому отпечатку
+        await status_msg.edit_text("recognizing audio fingerprint...")
+        recognized = await recognize_track(file_path)
+
+        if recognized:
+            artist = recognized["artist"]
+            title = recognized["title"]
+            source = "shazam"
+            cover_url = recognized.get("cover_url") or info.get("thumbnail")
+        else:
+            raw_title = info.get("title") or "track"
+            uploader = info.get("uploader") or info.get("channel") or "artist"
+            artist, title = parse_track_info(raw_title, uploader)
+            source = "youtube"
+            cover_url = info.get("thumbnail")
+
         duration = int(info.get("duration") or 0)
         views = info.get("view_count")
 
         cover_path = os.path.join(work_dir, "cover.jpg")
-        has_cover = download_cover(info.get("thumbnail"), cover_path) is not None
+        has_cover = download_cover(cover_url, cover_path) is not None
 
         fmt_name = "mp3 (320 kbps)" if mode == "audio_mp3" else "m4a (source aac)"
-        caption = build_audio_caption(artist, title, duration, size_mb, fmt_name, views)
+        caption = build_audio_caption(artist, title, duration, size_mb, fmt_name, views, source)
 
         task.update({
             "file_path": file_path,
@@ -212,6 +317,7 @@ async def handle_download_choice(callback: CallbackQuery):
             "size_mb": size_mb,
             "fmt_name": fmt_name,
             "views": views,
+            "source": source,
         })
 
         await status_msg.delete()
@@ -250,6 +356,56 @@ async def handle_tag_actions(callback: CallbackQuery, state: FSMContext):
         await state.set_state(AudioEditState.waiting_artist)
         await state.update_data(token=token)
         await callback.answer("send new artist in chat.")
+
+    elif action == "cover":
+        await state.set_state(AudioEditState.waiting_cover)
+        await state.update_data(token=token)
+        await callback.answer("send new cover image in chat.")
+
+    elif action == "shazam":
+        await callback.answer("scanning fingerprint...")
+        recognized = await recognize_track(task["file_path"])
+        if not recognized:
+            await callback.answer("no match found in shazam.", show_alert=True)
+            return
+
+        task["title"] = recognized["title"]
+        task["artist"] = recognized["artist"]
+        task["source"] = "shazam"
+
+        if recognized.get("cover_url"):
+            shazam_cover = os.path.join(task["work_dir"], "shazam_cover.jpg")
+            if download_cover(recognized["cover_url"], shazam_cover):
+                task["cover_path"] = shazam_cover
+                task["has_cover"] = True
+
+        caption = build_audio_caption(
+            task["artist"],
+            task["title"],
+            task["duration"],
+            task["size_mb"],
+            task["fmt_name"],
+            task.get("views"),
+            task["source"],
+        )
+
+        try:
+            if task.get("cover_path"):
+                await callback.message.edit_media(
+                    media=InputMediaPhoto(
+                        media=FSInputFile(task["cover_path"]),
+                        caption=caption,
+                    ),
+                    reply_markup=tag_editor_kb(token),
+                )
+            else:
+                await callback.message.edit_caption(
+                    caption=caption,
+                    reply_markup=tag_editor_kb(token),
+                )
+        except Exception:
+            pass
+        await callback.answer("matched with shazam.")
 
     elif action == "send":
         await callback.answer()
