@@ -1,17 +1,67 @@
-# YouTube to MP3 Telegram Bot
+# yoink-bot
 
-A private, self-hosted Telegram bot built on Python 3.12.10 that extracts high-fidelity MP3s from YouTube URLs, automatically embeds ID3 tags and cover art, and includes an interactive in-chat button editor for fixing metadata.
+telegram bot that downloads video or audio from a youtube link.
 
-## Prerequisites
+## features
 
-- **Python 3.12.10**
-- **FFmpeg**: Required by `yt-dlp` for audio extraction and conversion.
-  - Debian/Ubuntu: `sudo apt update && sudo apt install -y ffmpeg`
-  - Arch Linux: `sudo pacman -S ffmpeg`
+- downloads video up to 720p as mp4
+- extracts audio as mp3 via ffmpeg
+- inline keyboard format selector
+- optional telegram user allowlist
+- configurable file size threshold
 
-## Installation & Setup
+## quick start
 
-1. **Clone the repository**:
-   ```bash
-   git clone https://github.com/LelaPo/telegram-tiktok-downloader.git
-   cd yt-audio-bot
+1. clone the repository and step into the directory:
+```bash
+git clone https://github.com/example/yoink-bot.git
+cd yoink-bot
+```
+
+2. create the configuration file:
+```bash
+cp .env.example .env
+```
+
+3. set your bot token in `.env`:
+```bash
+BOT_TOKEN=your_token_here
+```
+
+4. launch the container:
+```bash
+docker compose up -d --build
+```
+
+5. inspect logs:
+```bash
+docker compose logs -f
+```
+
+## configuration
+
+| variable | description | default |
+| --- | --- | --- |
+| `BOT_TOKEN` | telegram bot token from @botfather | required |
+| `ALLOWED_USER_IDS` | comma-separated telegram user ids | empty (all allowed) |
+| `MAX_FILE_MB` | maximum download size in megabytes | 50 |
+
+## project layout
+
+```text
+.env.example
+.gitignore
+compose.yaml
+Dockerfile
+main.py
+README.md
+requirements.txt
+```
+
+## legal note
+
+this project is for personal use only. users are responsible for complying with applicable copyright laws and third-party platform terms of service.
+
+## license
+
+MIT

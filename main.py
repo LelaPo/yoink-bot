@@ -1,120 +1,201 @@
-"""
-Application entry point and startup lifecycle management.
-Targets: Python 3.12.10
-"""
-
+import asyncio
 import logging
+import os
+import re
+import secrets
 import shutil
-from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CallbackQueryHandler,
-    CommandHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
-)
-from telegram.request import HTTPXRequest
+import sys
+import tempfile
+from typing import Optional
 
-import config
-from handlers import (
-    button_callback_handler,
-    cancel_handler,
-    help_handler,
-    photo_message_handler,
-    start_handler,
-    text_message_handler,
+from aiogram import Bot, Dispatcher, F
+from aiogram.filters import Command, CommandStart
+from aiogram.types import (
+    CallbackQuery,
+    FSInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
 )
+import yt_dlp
 
-# Logging configuration
 logging.basicConfig(
-    format="%(asctime)s - [%(levelname)s] - %(name)s: %(message)s",
     level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
 )
-# Suppress httpx request logging to prevent token leaks in stdout
-logging.getLogger("httpx").setLevel(logging.WARNING)
 
-logger = logging.getLogger("yt_audio_bot")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+if not BOT_TOKEN:
+    logging.error("yoink: BOT_TOKEN is required")
+    sys.exit(1)
+
+# parse comma-separated allowed user ids
+ALLOWED_USER_IDS: set[int] = set()
+_raw_allowed = os.getenv("ALLOWED_USER_IDS", "").strip()
+if _raw_allowed:
+    for item in _raw_allowed.split(","):
+        cleaned = item.strip()
+        if cleaned.isdigit():
+            ALLOWED_USER_IDS.add(int(cleaned))
+
+try:
+    MAX_FILE_MB = int(os.getenv("MAX_FILE_MB", "50"))
+except ValueError:
+    MAX_FILE_MB = 50
+
+DOWNLOAD_DIR = "/tmp/downloads"
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+# store pending urls by short token to stay within callback data limits
+pending_urls: dict[str, str] = {}
+
+YOUTUBE_PATTERN = re.compile(
+    r"https?://(?:[a-zA-Z0-9_-]+\.)?(?:youtube\.com|youtu\.be)/\S+"
+)
+
+dp = Dispatcher()
 
 
-def cleanup_stale_temp_files():
-    """Purges any lingering session directories from previous unclean shutdowns."""
-    if config.DOWNLOAD_DIR.exists():
-        for item in config.DOWNLOAD_DIR.iterdir():
-            if item.is_dir():
-                shutil.rmtree(item, ignore_errors=True)
-        logger.info(
-            "Startup check: Cleaned stale directories in %s", config.DOWNLOAD_DIR
-        )
+def is_allowed(user_id: Optional[int]) -> bool:
+    if not ALLOWED_USER_IDS:
+        return True
+    return user_id in ALLOWED_USER_IDS
 
 
-async def global_error_handler(
-    update: object, context: ContextTypes.DEFAULT_TYPE
-) -> None:
-    """Log exceptions caused by updates without terminating the bot."""
-    logger.error("Exception while handling update %s:", update, exc_info=context.error)
+def extract_youtube_url(text: Optional[str]) -> Optional[str]:
+    if not text:
+        return None
+    match = YOUTUBE_PATTERN.search(text)
+    return match.group(0) if match else None
 
 
-def main() -> None:
-    """Builds and starts the Telegram bot."""
-    cleanup_stale_temp_files()
-
-    logger.info("Initializing bot application...")
-    builder = ApplicationBuilder().token(config.TELEGRAM_BOT_TOKEN)
-
-    # Configure connection timeouts and optional SOCKS5/HTTP proxy
-    if config.SOCKS5_PROXY:
-        logger.info(
-            "Enabling SOCKS5/HTTP proxy for Telegram API: %s", config.SOCKS5_PROXY
-        )
-        request = HTTPXRequest(
-            proxy=config.SOCKS5_PROXY,
-            connect_timeout=30.0,
-            read_timeout=60.0,
-            write_timeout=60.0,
-            media_write_timeout=180.0,
-        )
-        get_updates_request = HTTPXRequest(
-            proxy=config.SOCKS5_PROXY,
-            connect_timeout=30.0,
-            read_timeout=60.0,
-            write_timeout=60.0,
-        )
-        builder = builder.request(request).get_updates_request(get_updates_request)
+def run_download(url: str, mode: str, target_dir: str) -> str:
+    # download media synchronously with yt-dlp
+    outtmpl = os.path.join(target_dir, "%(title).50s-%(id)s.%(ext)s")
+    ydl_opts: dict = {
+        "outtmpl": outtmpl,
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+    }
+    if mode == "video":
+        ydl_opts["format"] = "bestvideo[height<=720]+bestaudio/best[height<=720]/best"
+        ydl_opts["merge_output_format"] = "mp4"
     else:
-        request = HTTPXRequest(
-            connect_timeout=20.0,
-            read_timeout=40.0,
-            write_timeout=40.0,
-            media_write_timeout=180.0,
-        )
-        builder = builder.request(request)
+        ydl_opts["format"] = "bestaudio/best"
+        ydl_opts["postprocessors"] = [
+            {
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+            }
+        ]
 
-    app = builder.build()
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
 
-    # Register error handler
-    app.add_error_handler(global_error_handler)
+    files = [
+        os.path.join(target_dir, f)
+        for f in os.listdir(target_dir)
+        if not f.endswith(".part") and not f.endswith(".ytdl")
+    ]
+    if not files:
+        raise RuntimeError("no output file produced")
 
-    # Commands
-    app.add_handler(CommandHandler("start", start_handler))
-    app.add_handler(CommandHandler("help", help_handler))
-    app.add_handler(CommandHandler("cancel", cancel_handler))
+    files.sort(key=lambda p: os.path.getsize(p), reverse=True)
+    return files[0]
 
-    # Inline Editor Button Callbacks
-    app.add_handler(CallbackQueryHandler(button_callback_handler))
 
-    # Message handlers
-    app.add_handler(MessageHandler(filters.PHOTO, photo_message_handler))
-    app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler)
+@dp.message(CommandStart())
+@dp.message(Command("help"))
+async def handle_start_or_help(message: Message) -> None:
+    if not is_allowed(message.from_user.id if message.from_user else None):
+        await message.answer("yoink: access denied.")
+        return
+    await message.answer("yoink: send me a youtube link.")
+
+
+@dp.message(F.text, ~F.text.startswith("/"))
+async def handle_text(message: Message) -> None:
+    if not is_allowed(message.from_user.id if message.from_user else None):
+        await message.answer("yoink: access denied.")
+        return
+
+    url = extract_youtube_url(message.text)
+    if not url:
+        await message.answer("yoink: send a valid youtube link.")
+        return
+
+    token = secrets.token_hex(4)
+    pending_urls[token] = url
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="video", callback_data=f"dl:video:{token}"),
+                InlineKeyboardButton(text="audio", callback_data=f"dl:audio:{token}"),
+            ]
+        ]
     )
+    await message.answer("yoink: pick a format.", reply_markup=keyboard)
 
-    logger.info(
-        "Bot is operational. Allowed user count: %d. Waiting for updates...",
-        len(config.ALLOWED_USER_IDS),
-    )
-    app.run_polling()
+
+@dp.callback_query(F.data.startswith("dl:"))
+async def handle_callback(callback: CallbackQuery) -> None:
+    if not is_allowed(callback.from_user.id if callback.from_user else None):
+        await callback.answer("yoink: access denied.")
+        return
+
+    parts = callback.data.split(":") if callback.data else []
+    if len(parts) != 3:
+        await callback.answer()
+        return
+
+    _, mode, token = parts
+    url = pending_urls.pop(token, None)
+    if not url:
+        await callback.answer()
+        if callback.message:
+            await callback.message.answer("yoink: link expired.")
+        return
+
+    await callback.answer()
+    if callback.message:
+        await callback.message.answer("yoink: fetching, give it a moment.")
+
+    # run blocking download in thread pool to avoid blocking the event loop
+    loop = asyncio.get_running_loop()
+    work_dir = tempfile.mkdtemp(dir=DOWNLOAD_DIR)
+    try:
+        file_path = await loop.run_in_executor(None, run_download, url, mode, work_dir)
+        size_mb = os.path.getsize(file_path) / (1024 * 1024)
+        if size_mb > MAX_FILE_MB:
+            if mode == "video" and callback.message:
+                await callback.message.answer(
+                    "yoink: that file is over the size limit, try audio."
+                )
+            elif callback.message:
+                await callback.message.answer("yoink: that file is over the size limit.")
+            return
+
+        payload = FSInputFile(file_path)
+        if callback.message:
+            if mode == "video":
+                await callback.message.answer_video(payload)
+            else:
+                await callback.message.answer_audio(payload)
+    except Exception as exc:
+        logging.warning("yoink: download error: %s", exc)
+        if callback.message:
+            await callback.message.answer("yoink: download failed.")
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+async def main() -> None:
+    bot = Bot(token=BOT_TOKEN)
+    logging.info("yoink: starting bot")
+    await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

@@ -1,0 +1,8 @@
+services:
+  yoink:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    tmpfs:
+      - /tmp/downloads

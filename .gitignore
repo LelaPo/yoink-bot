@@ -1,37 +1,7 @@
-# Environment & Secrets
-.env
-*.env
-
-# Python Bytecode & Runtime
 __pycache__/
 *.py[cod]
 *$py.class
-*.so
-
-# Virtual Environments
-venv/
-env/
-ENV/
+.env
 .venv/
-
-# Downloaded Media & Temp Files
-/tmp/
-temp_downloads/
-*.mp3
-*.m4a
-*.webm
-*.opus
-*.jpg
-*.jpeg
-*.png
-*.webp
-
-# Logs
-*.log
-logs/
-
-# IDE & OS files
-.vscode/
-.idea/
-.DS_Store
-Thumbs.db
+venv/
+downloads/
